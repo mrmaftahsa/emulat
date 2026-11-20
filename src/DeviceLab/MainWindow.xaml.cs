@@ -15,6 +15,8 @@ public partial class MainWindow : Window
     private readonly Preferences preferences;
     private readonly DispatcherTimer pollTimer;
     private AndroidTools tools;
+    private MEmuTools? memu;
+    private bool useMEmu;
     private IReadOnlyList<AndroidDevice> devices = [];
     private Task currentPoll = Task.CompletedTask;
     private bool busy;
@@ -23,6 +25,8 @@ public partial class MainWindow : Window
     private bool closed;
     private bool updatingSelection;
     private string? displayedDevice;
+    private bool CanListDevices => useMEmu ? memu?.IsInstalled == true : tools.HasEmulator;
+    private bool CanControlDevices => useMEmu ? memu?.IsInstalled == true : tools.HasAdb;
     private AndroidDevice? SelectedDevice => DevicesList.SelectedItem as AndroidDevice;
 
     public MainWindow()
@@ -31,10 +35,14 @@ public partial class MainWindow : Window
         var savedSdk = preferences.SdkDirectory;
         tools = new(savedSdk is not null && Path.IsPathFullyQualified(savedSdk)
             ? savedSdk : AndroidTools.FindSdk());
+        if (MEmuTools.FindExecutable(preferences.MEmuExecutable) is { } memuExecutable)
+            memu = new(memuExecutable);
+        useMEmu = preferences.UseMEmu ?? memu is not null;
         pollTimer = new() { Interval = TimeSpan.FromSeconds(5) };
         pollTimer.Tick += PollTick;
         InitializeComponent();
         SdkPath.Text = tools.SdkDirectory;
+        EmulatorChoice.SelectedIndex = useMEmu ? 0 : 1;
         UpdateDeviceList();
         SetStatus(warning ?? "Ready.");
     }
@@ -44,7 +52,7 @@ public partial class MainWindow : Window
         await PerformAsync("Checking this PC…", async () =>
         {
             await UpdateEnvironmentAsync();
-            if (!setupReady || !accelerationReady)
+            if (!setupReady || (!useMEmu && !accelerationReady))
                 SetupNav.IsChecked = true;
             await RefreshDevicesAsync();
         });
@@ -68,6 +76,60 @@ public partial class MainWindow : Window
         SetupPage.Visibility = showSetup ? Visibility.Visible : Visibility.Collapsed;
     }
 
+    private async void EmulatorChoiceChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (!IsLoaded || busy || (EmulatorChoice.SelectedIndex == 0) == useMEmu)
+            return;
+
+        await PerformAsync("Switching emulator…", async () =>
+        {
+            useMEmu = EmulatorChoice.SelectedIndex == 0;
+            preferences.UseMEmu = useMEmu;
+            devices = [];
+            UpdateDeviceList();
+            if (useMEmu && memu?.IsInstalled != true
+                && MEmuTools.FindExecutable(preferences.MEmuExecutable) is { } detected)
+                memu = new(detected);
+
+            await UpdateEnvironmentAsync();
+            if (setupReady && (useMEmu || accelerationReady))
+                DevicesNav.IsChecked = true;
+            else
+                SetupNav.IsChecked = true;
+            preferences.Save();
+            await RefreshDevicesAsync();
+        });
+    }
+
+    private async void BrowseMEmuClicked(object sender, RoutedEventArgs e)
+    {
+        var dialog = new OpenFolderDialog { Title = "Choose the MEmu folder that contains memuc.exe" };
+        if (memu is not null)
+            dialog.InitialDirectory = Path.GetDirectoryName(memu.Executable) ?? "";
+        if (dialog.ShowDialog(this) != true)
+            return;
+
+        await PerformAsync("Connecting to MEmu…", async () =>
+        {
+            var executable = new[] { Path.Combine(dialog.FolderName, "memuc.exe"),
+                Path.Combine(dialog.FolderName, "MEmu", "memuc.exe") }.FirstOrDefault(MEmuTools.IsCommandTool)
+                ?? throw new InvalidOperationException("Choose your MEmu installation folder. It should contain memuc.exe.");
+            var detected = new MEmuTools(executable);
+            var available = await detected.ListDevicesAsync();
+            preferences.MEmuExecutable = executable;
+            preferences.UseMEmu = true;
+            preferences.Save();
+
+            memu = detected;
+            devices = [];
+            UpdateDeviceList();
+            devices = available;
+            await UpdateEnvironmentAsync();
+            UpdateDeviceList();
+            DevicesNav.IsChecked = true;
+        }, "Connected to MEmu.");
+    }
+
     private void OpenSetupClicked(object sender, RoutedEventArgs e) => SetupNav.IsChecked = true;
 
     private void SearchChanged(object sender, TextChangedEventArgs e)
@@ -87,7 +149,7 @@ public partial class MainWindow : Window
 
     private void PollTick(object? sender, EventArgs e)
     {
-        if (!busy && currentPoll.IsCompleted && DevicesNav.IsChecked == true && tools.HasEmulator)
+        if (!busy && currentPoll.IsCompleted && DevicesNav.IsChecked == true && CanListDevices)
             currentPoll = PollDevicesAsync();
     }
 
@@ -103,30 +165,34 @@ public partial class MainWindow : Window
         }
     }
 
-    private async Task RefreshDevicesAsync(string? selectName = null)
+    private async Task RefreshDevicesAsync(string? selectName = null, int? selectMEmuIndex = null)
     {
-        var fresh = tools.HasEmulator ? await tools.ListDevicesAsync() : [];
+        IReadOnlyList<AndroidDevice> fresh = [];
+        if (CanListDevices)
+            fresh = useMEmu ? await memu!.ListDevicesAsync() : await tools.ListDevicesAsync();
         if (closed)
             return;
-        if (selectName is not null || !fresh.SequenceEqual(devices))
+        if (selectName is not null || selectMEmuIndex is not null || !fresh.SequenceEqual(devices))
         {
             devices = fresh;
-            UpdateDeviceList(selectName);
+            UpdateDeviceList(selectName, selectMEmuIndex);
         }
-        if (!tools.HasEmulator)
-            SetStatus("Choose Set up Android to get started.");
+        if (!CanListDevices)
+            SetStatus(useMEmu ? "Choose your MEmu installation in Setup." : "Choose Set up Android to get started.");
     }
 
-    private void UpdateDeviceList(string? selectName = null)
+    private void UpdateDeviceList(string? selectName = null, int? selectMEmuIndex = null)
     {
         var previousName = selectName ?? SelectedDevice?.Name;
+        var previousIndex = selectMEmuIndex ?? SelectedDevice?.MEmuIndex;
         var filter = SearchBox.Text.Trim();
         var visible = devices.Where(device => device.Name.Contains(filter, StringComparison.OrdinalIgnoreCase)
             || device.Status.Contains(filter, StringComparison.OrdinalIgnoreCase)).ToArray();
 
         updatingSelection = true;
         DevicesList.ItemsSource = visible;
-        DevicesList.SelectedItem = visible.FirstOrDefault(device => device.Name == previousName)
+        DevicesList.SelectedItem = visible.FirstOrDefault(device => useMEmu
+            ? previousIndex is not null && device.MEmuIndex == previousIndex : device.Name == previousName)
             ?? visible.FirstOrDefault();
         updatingSelection = false;
 
@@ -143,24 +209,29 @@ public partial class MainWindow : Window
         EmptyDetail.Visibility = selected is null ? Visibility.Visible : Visibility.Collapsed;
         OpenSetupButton.Visibility = setupReady ? Visibility.Collapsed : Visibility.Visible;
         CreateFirstButton.Visibility = setupReady && devices.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
-        EmptyTitle.Text = !setupReady ? "Set up Android"
+        EmptyTitle.Text = !setupReady ? (useMEmu ? "Connect to MEmu" : "Set up Android")
             : devices.Count > 0 ? "Select a virtual device" : "You’re ready to create a device";
-        EmptyHint.Text = !setupReady ? "Device Lab can download the tools this PC needs."
+        EmptyHint.Text = !setupReady ? (useMEmu ? "Pick your MEmu installation in Setup."
+                : "Device Lab can download the tools this PC needs.")
             : devices.Count > 0 ? "Clear the filter to see all registered devices."
-            : "Use the recommended Android version to get started.";
+            : useMEmu ? "Create a device with MEmu’s default Android version."
+                : "Use the recommended Android version to get started.";
+        LocationCard.Visibility = useMEmu ? Visibility.Collapsed : Visibility.Visible;
 
         if (selected is not null)
         {
             SelectedName.Text = selected.Name;
-            SelectedStatus.Text = selected.Serial is null ? selected.Status : $"{selected.Status}  ·  {selected.Serial}";
+            SelectedStatus.Text = selected.MEmuIndex is { } index ? $"{selected.Status}  ·  MEmu #{index}"
+                : selected.Serial is null ? selected.Status : $"{selected.Status}  ·  {selected.Serial}";
             LaunchError.Text = selected.LaunchError;
             LaunchError.Visibility = selected.LaunchError is null ? Visibility.Collapsed : Visibility.Visible;
         }
 
-        if (displayedDevice != selected?.Name)
+        var deviceKey = selected?.MEmuIndex is { } memuIndex ? $"MEmu:{memuIndex}" : selected?.Name;
+        if (displayedDevice != deviceKey)
         {
-            displayedDevice = selected?.Name;
-            var location = displayedDevice is not null && preferences.Locations.TryGetValue(displayedDevice, out var saved)
+            displayedDevice = deviceKey;
+            var location = !useMEmu && selected is not null && preferences.Locations.TryGetValue(selected.Name, out var saved)
                 ? saved : null;
             Latitude.Text = location?.Latitude.ToString(CultureInfo.CurrentCulture) ?? "";
             Longitude.Text = location?.Longitude.ToString(CultureInfo.CurrentCulture) ?? "";
@@ -175,9 +246,11 @@ public partial class MainWindow : Window
     {
         var device = SelectedDevice;
         var online = device?.IsOnline == true;
-        var canControl = !busy && tools.HasAdb;
-        var canSetLocation = device is not null && TryReadLocation(out _);
-        RefreshButton.IsEnabled = !busy && tools.HasEmulator;
+        var canControl = !busy && CanControlDevices;
+        var canSetLocation = !useMEmu && device is not null && TryReadLocation(out _);
+        RefreshButton.IsEnabled = !busy && CanListDevices;
+        EmulatorChoice.IsEnabled = !busy;
+        BrowseMEmuButton.IsEnabled = !busy;
         NewButton.IsEnabled = !busy && setupReady;
         CreateFirstButton.IsEnabled = !busy && setupReady;
         GuidedSetupButton.IsEnabled = !busy;
@@ -188,7 +261,7 @@ public partial class MainWindow : Window
         SdkPath.IsEnabled = !busy;
         DiagnosticsButton.IsEnabled = !busy;
         StartButton.IsEnabled = canControl && device?.Status == "Stopped";
-        StopButton.IsEnabled = canControl && device?.Serial is not null;
+        StopButton.IsEnabled = canControl && (useMEmu ? online : device?.Serial is not null);
         InstallButton.IsEnabled = canControl && online;
         LogsButton.IsEnabled = canControl && online;
         SaveLocationButton.IsEnabled = !busy && canSetLocation;
@@ -198,6 +271,17 @@ public partial class MainWindow : Window
 
     private async Task UpdateEnvironmentAsync()
     {
+        AndroidSetupSections.Visibility = useMEmu ? Visibility.Collapsed : Visibility.Visible;
+        MEmuSetupCard.Visibility = useMEmu ? Visibility.Visible : Visibility.Collapsed;
+        if (useMEmu)
+        {
+            setupReady = memu?.IsInstalled == true;
+            MEmuSummary.Text = setupReady ? "MEmu is connected. Open Devices to use your emulators."
+                : "Choose the folder where MEmu is installed. Device Lab looks for memuc.exe.";
+            ShowSelectedDevice();
+            return;
+        }
+
         var plan = await new AndroidSetup(tools).PlanAsync();
         setupReady = plan.IsReady;
         SetupSummary.Text = setupReady ? "The Android tools are ready."
@@ -334,6 +418,20 @@ public partial class MainWindow : Window
     {
         if (busy)
             return;
+        if (useMEmu)
+        {
+            await PerformAsync("Creating a MEmu device…", async () =>
+            {
+                var device = await memu!.CreateDeviceAsync();
+                SearchBox.Clear();
+                await RefreshDevicesAsync(selectMEmuIndex: device.MEmuIndex);
+                SetStatus($"Starting {device.Name}…");
+                await memu.StartDeviceAsync(device);
+                await RefreshDevicesAsync(selectMEmuIndex: device.MEmuIndex);
+            }, "MEmu created the new device. Start requested.");
+            return;
+        }
+
         try
         {
             var images = tools.ListSystemImages().Where(image => image.Package.EndsWith(";x86_64", StringComparison.Ordinal)).ToArray();
@@ -381,7 +479,7 @@ public partial class MainWindow : Window
         if (SelectedDevice is { } device)
             await PerformAsync($"Starting {device.Name}…", async () =>
             {
-                await tools.StartDeviceAsync(device);
+                await (useMEmu ? memu!.StartDeviceAsync(device) : tools.StartDeviceAsync(device));
                 await RefreshDevicesAsync();
             }, $"Start requested for {device.Name}.");
     }
@@ -391,7 +489,7 @@ public partial class MainWindow : Window
         if (SelectedDevice is { } device)
             await PerformAsync($"Stopping {device.Name}…", async () =>
             {
-                await tools.StopDeviceAsync(device);
+                await (useMEmu ? memu!.StopDeviceAsync(device) : tools.StopDeviceAsync(device));
                 await RefreshDevicesAsync();
             }, $"Stop requested for {device.Name}.");
     }
@@ -404,7 +502,7 @@ public partial class MainWindow : Window
         if (dialog.ShowDialog(this) == true)
         {
             await PerformAsync($"Installing {Path.GetFileName(dialog.FileName)}…",
-                () => tools.InstallAsync(device, dialog.FileName), $"APK installed on {device.Name}.");
+                () => useMEmu ? memu!.InstallAsync(device, dialog.FileName) : tools.InstallAsync(device, dialog.FileName), $"APK installed on {device.Name}.");
         }
     }
 
@@ -467,7 +565,7 @@ public partial class MainWindow : Window
             return;
         await PerformAsync("Reading device logs…", async () =>
         {
-            var output = await tools.ReadLogsAsync(device);
+            var output = await (useMEmu ? memu!.ReadLogsAsync(device) : tools.ReadLogsAsync(device));
             Logs.Text = string.IsNullOrWhiteSpace(output) ? "No log entries returned." : output;
             Logs.Visibility = Visibility.Visible;
             Logs.ScrollToEnd();

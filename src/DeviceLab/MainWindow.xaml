@@ -21,8 +21,15 @@
                     <RadioButton x:Name="SetupNav" Style="{StaticResource Navigation}"
                                  GroupName="Workspace" Content="Setup" Checked="NavigationChanged"/>
                 </StackPanel>
-                <TextBlock DockPanel.Dock="Right" Text="Android emulator manager" Foreground="{StaticResource HeaderMuted}"
-                           VerticalAlignment="Center"/>
+                <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center">
+                    <TextBlock Text="Emulator" Foreground="{StaticResource HeaderMuted}"
+                               VerticalAlignment="Center" Margin="0,0,8,0"/>
+                    <ComboBox x:Name="EmulatorChoice" Width="146" AutomationProperties.Name="Emulator"
+                              SelectionChanged="EmulatorChoiceChanged">
+                        <ComboBoxItem Content="MEmu"/>
+                        <ComboBoxItem Content="Android SDK"/>
+                    </ComboBox>
+                </StackPanel>
             </DockPanel>
         </Border>
 
@@ -133,7 +140,7 @@
                             </StackPanel>
                         </Border>
 
-                        <Border Style="{StaticResource Card}" Margin="0,12,0,0">
+                        <Border x:Name="LocationCard" Style="{StaticResource Card}" Margin="0,12,0,0">
                             <StackPanel>
                                 <TextBlock Text="Test location" Style="{StaticResource Heading}"/>
                                 <TextBlock Text="Save coordinates for this device and apply them to the running emulator."
@@ -181,64 +188,75 @@
         <ScrollViewer x:Name="SetupPage" Grid.Row="1" Visibility="Collapsed" VerticalScrollBarVisibility="Auto">
             <StackPanel Margin="25,23" MaxWidth="1200">
                 <TextBlock Text="Setup" Style="{StaticResource Title}" Margin="0,0,0,15"/>
-                <Border Style="{StaticResource Card}" Margin="0,0,0,12">
+                <Border x:Name="MEmuSetupCard" Style="{StaticResource Card}" Visibility="Collapsed">
                     <StackPanel>
-                        <TextBlock Text="Android setup" Style="{StaticResource Heading}"/>
-                        <TextBlock x:Name="SetupSummary" Text="Checking the Android components on this PC…"
-                                   Style="{StaticResource Hint}" Margin="0,5,0,13"/>
-                        <Button x:Name="GuidedSetupButton" Content="Set up Android" Click="GuidedSetupClicked"
-                                Style="{StaticResource PrimaryButton}" HorizontalAlignment="Left"/>
+                        <TextBlock Text="MEmu setup" Style="{StaticResource Heading}"/>
+                        <TextBlock x:Name="MEmuSummary" Style="{StaticResource Hint}" Margin="0,5,0,13"/>
+                        <Button x:Name="BrowseMEmuButton" Content="Choose MEmu folder…" Click="BrowseMEmuClicked"
+                                HorizontalAlignment="Left"/>
                     </StackPanel>
                 </Border>
 
-                <Border x:Name="VirtualizationCard" Style="{StaticResource Card}" Margin="0,0,0,12" Visibility="Collapsed">
-                    <StackPanel>
-                        <TextBlock Text="Windows virtualization" Style="{StaticResource Heading}"/>
-                        <TextBlock x:Name="VirtualizationSummary" Style="{StaticResource Hint}" Margin="0,5,0,13"/>
-                        <WrapPanel>
-                            <Button x:Name="EnableVirtualizationButton" Content="Enable Windows virtualization"
-                                    Click="EnableVirtualizationClicked" Style="{StaticResource PrimaryButton}" Margin="0,0,8,5"/>
-                            <Button x:Name="CheckVirtualizationButton" Content="Check again" Click="CheckVirtualizationClicked"
-                                    Margin="0,0,8,5"/>
-                            <Button Content="Virtualization help" Click="VirtualizationHelpClicked" Margin="0,0,0,5"/>
-                        </WrapPanel>
-                    </StackPanel>
-                </Border>
-
-                <Border Style="{StaticResource Card}">
-                    <Expander Header="Advanced settings">
-                        <StackPanel Margin="0,13,0,0">
-                            <Label Content="_Android SDK folder" Target="{Binding ElementName=SdkPath}" FontWeight="SemiBold" Padding="0,0,0,7"/>
-                            <DockPanel>
-                                <Button x:Name="BrowseButton" DockPanel.Dock="Right" Content="_Browse…" Click="BrowseClicked" Margin="8,0,0,0"/>
-                                <TextBox x:Name="SdkPath" AutomationProperties.Name="Android SDK folder" TextChanged="SdkPathChanged"/>
-                            </DockPanel>
-                            <TextBlock Text="Change this folder if you want Device Lab to use a different Android SDK."
-                                       Style="{StaticResource Hint}" Margin="0,8,0,13"/>
-                            <Button x:Name="DiagnosticsButton" Content="Save and run _diagnostics" Click="DiagnosticsClicked"
-                                    HorizontalAlignment="Left"/>
-                            <TextBlock x:Name="DiagnosticsHint" Style="{StaticResource Hint}" Margin="0,13,0,0"/>
-                            <ItemsControl x:Name="DiagnosticsList" Margin="0,9,0,0" AutomationProperties.Name="Environment checks">
-                                <ItemsControl.ItemTemplate>
-                                    <DataTemplate>
-                                        <Border BorderBrush="{StaticResource Border}" BorderThickness="0,1,0,0" Padding="0,9">
-                                            <Grid>
-                                                <Grid.ColumnDefinitions>
-                                                    <ColumnDefinition Width="164"/>
-                                                    <ColumnDefinition Width="74"/>
-                                                    <ColumnDefinition Width="*"/>
-                                                </Grid.ColumnDefinitions>
-                                                <TextBlock Text="{Binding Check}" FontWeight="SemiBold" TextWrapping="Wrap" Margin="0,0,8,0"/>
-                                                <TextBlock Grid.Column="1" Text="{Binding Status}" Foreground="{StaticResource Accent}" FontWeight="SemiBold"/>
-                                                <TextBlock Grid.Column="2" Text="{Binding Detail}" Style="{StaticResource Hint}"/>
-                                            </Grid>
-                                        </Border>
-                                    </DataTemplate>
-                                </ItemsControl.ItemTemplate>
-                            </ItemsControl>
+                <StackPanel x:Name="AndroidSetupSections">
+                    <Border Style="{StaticResource Card}" Margin="0,0,0,12">
+                        <StackPanel>
+                            <TextBlock Text="Android setup" Style="{StaticResource Heading}"/>
+                            <TextBlock x:Name="SetupSummary" Text="Checking the Android components on this PC…"
+                                       Style="{StaticResource Hint}" Margin="0,5,0,13"/>
+                            <Button x:Name="GuidedSetupButton" Content="Set up Android" Click="GuidedSetupClicked"
+                                    Style="{StaticResource PrimaryButton}" HorizontalAlignment="Left"/>
                         </StackPanel>
-                    </Expander>
-                </Border>
+                    </Border>
+
+                    <Border x:Name="VirtualizationCard" Style="{StaticResource Card}" Margin="0,0,0,12" Visibility="Collapsed">
+                        <StackPanel>
+                            <TextBlock Text="Windows virtualization" Style="{StaticResource Heading}"/>
+                            <TextBlock x:Name="VirtualizationSummary" Style="{StaticResource Hint}" Margin="0,5,0,13"/>
+                            <WrapPanel>
+                                <Button x:Name="EnableVirtualizationButton" Content="Enable Windows virtualization"
+                                        Click="EnableVirtualizationClicked" Style="{StaticResource PrimaryButton}" Margin="0,0,8,5"/>
+                                <Button x:Name="CheckVirtualizationButton" Content="Check again" Click="CheckVirtualizationClicked"
+                                        Margin="0,0,8,5"/>
+                                <Button Content="Virtualization help" Click="VirtualizationHelpClicked" Margin="0,0,0,5"/>
+                            </WrapPanel>
+                        </StackPanel>
+                    </Border>
+
+                    <Border Style="{StaticResource Card}">
+                        <Expander Header="Advanced settings">
+                            <StackPanel Margin="0,13,0,0">
+                                <Label Content="_Android SDK folder" Target="{Binding ElementName=SdkPath}" FontWeight="SemiBold" Padding="0,0,0,7"/>
+                                <DockPanel>
+                                    <Button x:Name="BrowseButton" DockPanel.Dock="Right" Content="_Browse…" Click="BrowseClicked" Margin="8,0,0,0"/>
+                                    <TextBox x:Name="SdkPath" AutomationProperties.Name="Android SDK folder" TextChanged="SdkPathChanged"/>
+                                </DockPanel>
+                                <TextBlock Text="Change this folder if you want Device Lab to use a different Android SDK."
+                                           Style="{StaticResource Hint}" Margin="0,8,0,13"/>
+                                <Button x:Name="DiagnosticsButton" Content="Save and run _diagnostics" Click="DiagnosticsClicked"
+                                        HorizontalAlignment="Left"/>
+                                <TextBlock x:Name="DiagnosticsHint" Style="{StaticResource Hint}" Margin="0,13,0,0"/>
+                                <ItemsControl x:Name="DiagnosticsList" Margin="0,9,0,0" AutomationProperties.Name="Environment checks">
+                                    <ItemsControl.ItemTemplate>
+                                        <DataTemplate>
+                                            <Border BorderBrush="{StaticResource Border}" BorderThickness="0,1,0,0" Padding="0,9">
+                                                <Grid>
+                                                    <Grid.ColumnDefinitions>
+                                                        <ColumnDefinition Width="164"/>
+                                                        <ColumnDefinition Width="74"/>
+                                                        <ColumnDefinition Width="*"/>
+                                                    </Grid.ColumnDefinitions>
+                                                    <TextBlock Text="{Binding Check}" FontWeight="SemiBold" TextWrapping="Wrap" Margin="0,0,8,0"/>
+                                                    <TextBlock Grid.Column="1" Text="{Binding Status}" Foreground="{StaticResource Accent}" FontWeight="SemiBold"/>
+                                                    <TextBlock Grid.Column="2" Text="{Binding Detail}" Style="{StaticResource Hint}"/>
+                                                </Grid>
+                                            </Border>
+                                        </DataTemplate>
+                                    </ItemsControl.ItemTemplate>
+                                </ItemsControl>
+                            </StackPanel>
+                        </Expander>
+                    </Border>
+                </StackPanel>
             </StackPanel>
         </ScrollViewer>
 

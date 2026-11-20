@@ -79,6 +79,12 @@ jobs:
             }
           }
 
+      - name: Test MEmu commands
+        shell: pwsh
+        run: |
+          dotnet run --project tests/MEmuCheck/MEmuCheck.csproj -c Release
+          if ($LASTEXITCODE -ne 0) { throw 'MEmu command checks failed.' }
+
       - name: Verify Android setup on a clean SDK
         if: inputs.check_android_setup || inputs.release_version != ''
         shell: pwsh

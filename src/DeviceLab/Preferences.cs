@@ -11,6 +11,8 @@ internal sealed class Preferences
     private static readonly string FilePath = Path.Combine(Folder, "settings.json");
 
     public string? SdkDirectory { get; set; }
+    public bool? UseMEmu { get; set; }
+    public string? MEmuExecutable { get; set; }
     public Dictionary<string, LocationProfile> Locations { get; set; } = new(StringComparer.Ordinal);
 
     public static Preferences Load(out string? warning)

@@ -6,7 +6,7 @@ using System.Text.RegularExpressions;
 
 namespace DeviceLab;
 
-internal sealed record AndroidDevice(string Name, string? Serial, string Status, string? LaunchError = null)
+internal sealed record AndroidDevice(string Name, string? Serial, string Status, string? LaunchError = null, int? MEmuIndex = null)
 {
     public bool IsOnline => Status == "Running";
 }
