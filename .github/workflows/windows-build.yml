@@ -1,0 +1,72 @@
+name: Build Windows app
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-2025
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Publish Windows x64
+        shell: pwsh
+        run: |
+          dotnet publish src/DeviceLab/DeviceLab.csproj -c Release -r win-x64 --self-contained true -p:DebugType=None -p:DebugSymbols=false -o publish
+          if ($LASTEXITCODE -ne 0) { throw 'dotnet publish failed.' }
+          New-Item -ItemType Directory -Path artifacts -Force | Out-Null
+          Compress-Archive -Path publish/* -DestinationPath artifacts/DeviceLab-win-x64.zip
+
+      - name: Build installer
+        shell: pwsh
+        run: |
+          $compiler = Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6\ISCC.exe'
+          if (-not (Test-Path $compiler)) {
+            choco install innosetup --no-progress --yes
+            if ($LASTEXITCODE -ne 0) { throw 'Inno Setup installation failed.' }
+          }
+          & $compiler installer/DeviceLab.iss
+          if ($LASTEXITCODE -ne 0) { throw 'Installer build failed.' }
+
+      - name: Test installation and app startup
+        shell: pwsh
+        run: |
+          $installDir = Join-Path $env:RUNNER_TEMP 'DeviceLabSmokeInstall'
+          $setup = Start-Process -FilePath 'artifacts/DeviceLab-setup-win-x64.exe' `
+            -ArgumentList "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /DIR=""$installDir""" -Wait -PassThru
+          if ($setup.ExitCode -ne 0) { throw "Installer exited with code $($setup.ExitCode)." }
+
+          $app = Start-Process -FilePath (Join-Path $installDir 'DeviceLab.exe') -PassThru
+          try {
+            $ready = $app.WaitForInputIdle(20000)
+            $app.Refresh()
+            if (-not $ready -or $app.HasExited) { throw 'Device Lab did not finish starting.' }
+            # WaitForInputIdle can return before the top-level WPF window is shown.
+            for ($attempt = 0; $attempt -lt 10 -and -not $app.MainWindowHandle; $attempt++) {
+              Start-Sleep -Milliseconds 500
+              $app.Refresh()
+            }
+            if ($app.HasExited -or -not $app.MainWindowHandle) { throw 'Device Lab did not open a window.' }
+          }
+          finally {
+            if (-not $app.HasExited -and (-not $app.CloseMainWindow() -or -not $app.WaitForExit(5000))) {
+              Stop-Process -Id $app.Id -Force
+            }
+          }
+
+      - name: Upload Windows downloads
+        uses: actions/upload-artifact@v4
+        with:
+          name: DeviceLab-windows-x64
+          path: artifacts/*
+          if-no-files-found: error
