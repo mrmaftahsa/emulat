@@ -5,6 +5,15 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+    inputs:
+      check_android_setup:
+        description: Verify a clean Android download and AVD creation
+        type: boolean
+        default: false
+      release_version:
+        description: 'Publish this version after verification (for example, v0.2.0)'
+        type: string
+        default: ''
 
 permissions:
   contents: read
@@ -12,7 +21,7 @@ permissions:
 jobs:
   windows:
     runs-on: windows-2025
-    timeout-minutes: 20
+    timeout-minutes: 55
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-dotnet@v5
@@ -21,7 +30,13 @@ jobs:
 
       - name: Publish Windows x64
         shell: pwsh
+        env:
+          RELEASE_VERSION: ${{ inputs.release_version }}
         run: |
+          $version = ([xml](Get-Content src/DeviceLab/DeviceLab.csproj -Raw)).Project.PropertyGroup.Version
+          if ($env:RELEASE_VERSION -and $env:RELEASE_VERSION -ne "v$version") {
+            throw "Use v$version to publish this version."
+          }
           dotnet publish src/DeviceLab/DeviceLab.csproj -c Release -r win-x64 --self-contained true -p:DebugType=None -p:DebugSymbols=false -o publish
           if ($LASTEXITCODE -ne 0) { throw 'dotnet publish failed.' }
           New-Item -ItemType Directory -Path artifacts -Force | Out-Null
@@ -64,9 +79,37 @@ jobs:
             }
           }
 
+      - name: Verify Android setup on a clean SDK
+        if: inputs.check_android_setup || inputs.release_version != ''
+        shell: pwsh
+        run: |
+          $setupDir = Join-Path $env:RUNNER_TEMP "DeviceLab setup check $env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          dotnet run --project tests/SetupCheck/SetupCheck.csproj -c Release -- $setupDir
+          if ($LASTEXITCODE -ne 0) { throw 'Android setup verification failed.' }
+
       - name: Upload Windows downloads
         uses: actions/upload-artifact@v6
         with:
           name: DeviceLab-windows-x64
           path: artifacts/*
           if-no-files-found: error
+
+
+  release:
+    if: github.ref == 'refs/heads/main' && inputs.release_version != ''
+    needs: windows
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          name: DeviceLab-windows-x64
+          path: artifacts
+      - name: Publish the Windows installer
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.release_version }}
+        run: |
+          gh release create "$VERSION" artifacts/DeviceLab-setup-win-x64.exe artifacts/DeviceLab-win-x64.zip \
+            --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "Device Lab $VERSION" --generate-notes

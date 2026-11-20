@@ -1,5 +1,5 @@
 #ifndef AppVersion
-#define AppVersion "0.1.0"
+#define AppVersion "0.2.0"
 #endif
 
 [Setup]
@@ -25,3 +25,6 @@ Source: "..\publish\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs cr
 
 [Icons]
 Name: "{userprograms}\Device Lab"; Filename: "{app}\DeviceLab.exe"
+
+[Run]
+Filename: "{app}\DeviceLab.exe"; Description: "Open Device Lab"; Flags: nowait postinstall skipifsilent

@@ -1,17 +1,15 @@
 # Device Lab
 
-Device Lab is a Windows desktop app for running repeatable Android emulator tests. It uses the official Android SDK and keeps each device’s saved test coordinates on your PC.
+Device Lab is a Windows app for Android emulator testing. It creates virtual devices, installs test APKs, reads logs, and saves GPS test coordinates for each device.
 
 ## Install on Windows
 
-Open this repository’s **Actions** tab, choose the latest successful **Build Windows app** run, and download the **DeviceLab-windows-x64** artifact. Unzip it, then choose **DeviceLab-setup-win-x64.exe** to install the app or extract **DeviceLab-win-x64.zip** and launch **DeviceLab.exe** for a portable build. Signing is not configured for these builds.
+1. Download **DeviceLab-setup-win-x64.exe** from [GitHub Releases](https://github.com/mrmaftahsa/emulat/releases/latest) and run it.
+2. Open Device Lab. If it opens **Setup**, click **Set up Android**, then **Next**. Review Google’s Android SDK terms if prompted and click **Install**. Device Lab installs Java and the Android components it needs automatically.
+3. If Device Lab asks for Windows virtualization, click **Enable Windows virtualization**. Approve the Windows prompt and restart if asked. Device Lab checks again when it opens. [Windows virtualization help](https://developer.android.com/studio/run/emulator-acceleration#vm-windows)
+4. Click **New device** and **Create and start** to use the recommended settings. Once Android connects, you can install a test APK or apply GPS test coordinates.
 
-1. Install [Android Studio](https://developer.android.com/studio). In **SDK Manager**, install **Android Emulator**, **Android SDK Platform-Tools**, **Android SDK Command-line Tools**, and an x86-64 Android system image.
-2. Open **SDK setup** in Device Lab. Confirm the SDK folder and click **Save and run diagnostics**. Device Lab can use the JDK bundled with a standard Android Studio installation or one set in `JAVA_HOME`.
-3. Open **Devices** and click **New device**. Select an installed system image and create an AVD. Existing AVDs appear automatically when they use the same Android SDK user environment.
-4. Start a device. Once ADB connects, install a test APK, read the latest logcat entries, or enter latitude and longitude under **Test location**. Use **Save location** to keep coordinates and **Apply to emulator** to send them for the current run.
-
-Device Lab targets Windows 10 build 19041 or newer on x64. For emulator acceleration, follow the [Android Emulator acceleration guide](https://developer.android.com/studio/run/emulator-acceleration#vm-windows). The Android SDK and system images are installed separately from Device Lab.
+A clean setup uses about 2–3 GB of downloads and needs at least 9 GB of free space on the Android SDK drive. An existing Android SDK can be reused. Device Lab keeps its downloaded Java runtime in your user profile and uses it automatically. Code signing is not configured.
 
 ## Build and extend
 
@@ -21,14 +19,10 @@ Install the [.NET 10 SDK](https://dotnet.microsoft.com/download/dotnet/10.0) on 
 dotnet run --project src/DeviceLab/DeviceLab.csproj
 ```
 
-For a self-contained build:
+The **Build Windows app** workflow builds the x64 installer and tests Windows startup. Release builds also test provisioning a clean SDK and creating an AVD before publishing downloads. From **Actions**, enter the version in the workflow dispatch form to publish a release, or select **Verify a clean Android download and AVD creation** to run the check on its own.
 
-```powershell
-dotnet publish src/DeviceLab/DeviceLab.csproj -c Release -r win-x64 --self-contained true -o publish
-```
-
-The GitHub Actions workflow builds and tests the Windows installer on pushes to `main`, pull requests, and manual runs. The installation recipe lives in `installer/DeviceLab.iss`.
-
-- `MainWindow.xaml` and `MainWindow.xaml.cs` contain the desktop screens and workflows.
+- `MainWindow.xaml` and `MainWindow.xaml.cs` contain the device controls and setup entry points.
+- `SetupWindow.xaml` and `AndroidSetup.cs` guide users through downloading the dependencies.
 - `AndroidTools.cs` calls the official emulator, ADB, and AVD manager tools.
 - `Preferences.cs` saves the SDK path and per-device coordinates to `%LOCALAPPDATA%\DeviceLab\settings.json`.
+- `installer/DeviceLab.iss` defines the Windows installer.

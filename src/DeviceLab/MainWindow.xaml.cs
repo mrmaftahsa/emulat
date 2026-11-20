@@ -1,4 +1,5 @@
 using System.ComponentModel;
+using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.Windows;
@@ -17,6 +18,8 @@ public partial class MainWindow : Window
     private IReadOnlyList<AndroidDevice> devices = [];
     private Task currentPoll = Task.CompletedTask;
     private bool busy;
+    private bool setupReady;
+    private bool accelerationReady;
     private bool closed;
     private bool updatingSelection;
     private string? displayedDevice;
@@ -38,7 +41,13 @@ public partial class MainWindow : Window
 
     private async void WindowLoaded(object sender, RoutedEventArgs e)
     {
-        await PerformAsync("Reading virtual devices…", () => RefreshDevicesAsync());
+        await PerformAsync("Checking this PC…", async () =>
+        {
+            await UpdateEnvironmentAsync();
+            if (!setupReady || !accelerationReady)
+                SetupNav.IsChecked = true;
+            await RefreshDevicesAsync();
+        });
         if (!closed)
             pollTimer.Start();
     }
@@ -105,7 +114,7 @@ public partial class MainWindow : Window
             UpdateDeviceList(selectName);
         }
         if (!tools.HasEmulator)
-            SetStatus("Open SDK setup to connect an Android Emulator installation.");
+            SetStatus("Choose Set up Android to get started.");
     }
 
     private void UpdateDeviceList(string? selectName = null)
@@ -132,17 +141,20 @@ public partial class MainWindow : Window
         var selected = SelectedDevice;
         DeviceDetails.Visibility = selected is null ? Visibility.Collapsed : Visibility.Visible;
         EmptyDetail.Visibility = selected is null ? Visibility.Visible : Visibility.Collapsed;
-        OpenSetupButton.Visibility = tools.HasEmulator ? Visibility.Collapsed : Visibility.Visible;
-        EmptyTitle.Text = !tools.HasEmulator ? "Connect the Android SDK"
-            : devices.Count > 0 ? "Select a virtual device" : "Create your first virtual device";
-        EmptyHint.Text = !tools.HasEmulator ? "Set the SDK folder and check the emulator tools."
+        OpenSetupButton.Visibility = setupReady ? Visibility.Collapsed : Visibility.Visible;
+        CreateFirstButton.Visibility = setupReady && devices.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+        EmptyTitle.Text = !setupReady ? "Set up Android"
+            : devices.Count > 0 ? "Select a virtual device" : "You’re ready to create a device";
+        EmptyHint.Text = !setupReady ? "Device Lab can download the tools this PC needs."
             : devices.Count > 0 ? "Clear the filter to see all registered devices."
-            : "Choose New device and select an installed Android system image.";
+            : "Use the recommended Android version to get started.";
 
         if (selected is not null)
         {
             SelectedName.Text = selected.Name;
             SelectedStatus.Text = selected.Serial is null ? selected.Status : $"{selected.Status}  ·  {selected.Serial}";
+            LaunchError.Text = selected.LaunchError;
+            LaunchError.Visibility = selected.LaunchError is null ? Visibility.Collapsed : Visibility.Visible;
         }
 
         if (displayedDevice != selected?.Name)
@@ -166,7 +178,11 @@ public partial class MainWindow : Window
         var canControl = !busy && tools.HasAdb;
         var canSetLocation = device is not null && TryReadLocation(out _);
         RefreshButton.IsEnabled = !busy && tools.HasEmulator;
-        NewButton.IsEnabled = !busy && tools.HasEmulator;
+        NewButton.IsEnabled = !busy && setupReady;
+        CreateFirstButton.IsEnabled = !busy && setupReady;
+        GuidedSetupButton.IsEnabled = !busy;
+        EnableVirtualizationButton.IsEnabled = !busy;
+        CheckVirtualizationButton.IsEnabled = !busy;
         DeviceEditor.IsEnabled = !busy;
         BrowseButton.IsEnabled = !busy;
         SdkPath.IsEnabled = !busy;
@@ -178,6 +194,84 @@ public partial class MainWindow : Window
         SaveLocationButton.IsEnabled = !busy && canSetLocation;
         ApplyLocationButton.IsEnabled = canControl && online && canSetLocation;
         WorkProgress.Visibility = busy ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    private async Task UpdateEnvironmentAsync()
+    {
+        var plan = await new AndroidSetup(tools).PlanAsync();
+        setupReady = plan.IsReady;
+        SetupSummary.Text = setupReady ? "The Android tools are ready."
+            : !plan.NeedsAndroid ? "Install Java automatically to create new virtual devices."
+            : "Device Lab can download and install the Android components for you.";
+        GuidedSetupButton.Visibility = setupReady ? Visibility.Collapsed : Visibility.Visible;
+
+        accelerationReady = false;
+        VirtualizationCard.Visibility = Visibility.Collapsed;
+        if (tools.HasEmulator)
+        {
+            var acceleration = await tools.CheckAccelerationAsync();
+            accelerationReady = acceleration.Status == "Ready";
+            VirtualizationCard.Visibility = accelerationReady ? Visibility.Collapsed : Visibility.Visible;
+            VirtualizationSummary.Text = "Enable Windows virtualization to run Android. Windows may ask for administrator approval and a restart.";
+        }
+
+        ShowSelectedDevice();
+    }
+
+    private async void GuidedSetupClicked(object sender, RoutedEventArgs e)
+    {
+        await PerformAsync("Checking Android setup…", async () =>
+        {
+            var setup = new AndroidSetup(tools);
+            var plan = await setup.PlanAsync();
+            var finished = plan.IsReady || new SetupWindow(setup, plan) { Owner = this }.ShowDialog() == true;
+            await UpdateEnvironmentAsync();
+            await RefreshDevicesAsync();
+            if (!finished)
+                return;
+
+            if (accelerationReady)
+            {
+                DevicesNav.IsChecked = true;
+                SetStatus("Android is ready. Choose New device to get started.");
+            }
+            else
+            {
+                SetStatus("Android is ready. Finish the Windows virtualization step to start a device.");
+            }
+        });
+    }
+
+    private async void EnableVirtualizationClicked(object sender, RoutedEventArgs e)
+    {
+        await PerformAsync("Waiting for Windows…", async () =>
+        {
+            await AndroidSetup.EnableWindowsVirtualizationAsync();
+            VirtualizationSummary.Text = "Windows virtualization was enabled. Restart your PC, then open Device Lab again.";
+        }, "Restart your PC to finish setting up virtualization.");
+    }
+
+    private async void CheckVirtualizationClicked(object sender, RoutedEventArgs e)
+    {
+        await PerformAsync("Checking virtualization…", async () =>
+        {
+            await UpdateEnvironmentAsync();
+            if (setupReady && accelerationReady)
+                DevicesNav.IsChecked = true;
+        });
+    }
+
+    private void VirtualizationHelpClicked(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            Process.Start(new ProcessStartInfo(
+                "https://developer.android.com/studio/run/emulator-acceleration#vm-windows") { UseShellExecute = true });
+        }
+        catch (Win32Exception ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
     }
 
     private void BrowseClicked(object sender, RoutedEventArgs e)
@@ -230,6 +324,7 @@ public partial class MainWindow : Window
             DiagnosticsList.ItemsSource = checks;
             DiagnosticsHint.Text = $"{checks.Count(check => check.Status == "Ready")} ready  ·  {checks.Count(check => check.Status == "Check")} need attention";
 
+            await UpdateEnvironmentAsync();
             if (tools.HasEmulator)
                 await RefreshDevicesAsync();
         }, "Diagnostics complete.");
@@ -241,10 +336,20 @@ public partial class MainWindow : Window
             return;
         try
         {
-            var images = tools.ListSystemImages();
-            if (images.Count == 0)
-                throw new InvalidOperationException("Install an Android system image in Android Studio’s SDK Manager first.");
-            var dialog = new CreateDeviceWindow(images) { Owner = this };
+            var images = tools.ListSystemImages().Where(image => image.Package.EndsWith(";x86_64", StringComparison.Ordinal)).ToArray();
+            if (images.Length == 0)
+            {
+                SetupNav.IsChecked = true;
+                SetStatus("Choose Set up Android to download an Android system.");
+                return;
+            }
+
+            int next = 1;
+            var names = devices.Select(device => device.Name).ToHashSet(StringComparer.OrdinalIgnoreCase);
+            while (names.Contains($"Android_{next}"))
+                next++;
+            var startImmediately = accelerationReady;
+            var dialog = new CreateDeviceWindow(images, $"Android_{next}", startImmediately) { Owner = this };
             if (dialog.ShowDialog() != true)
                 return;
 
@@ -255,9 +360,15 @@ public partial class MainWindow : Window
                 await tools.CreateDeviceAsync(name, image);
                 SearchBox.Clear();
                 await RefreshDevicesAsync(name);
-                if (!devices.Any(device => device.Name == name))
-                    throw new InvalidOperationException("The Android tools did not confirm that the device was created.");
-            }, $"Created {name}.");
+                var device = devices.FirstOrDefault(device => device.Name == name)
+                    ?? throw new InvalidOperationException("The Android tools did not confirm that the device was created.");
+                if (startImmediately)
+                {
+                    SetStatus($"Starting {name}…");
+                    await tools.StartDeviceAsync(device);
+                    await RefreshDevicesAsync(name);
+                }
+            }, startImmediately ? $"Start requested for {name}." : $"Created {name}. Open Setup to check virtualization.");
         }
         catch (Exception ex) when (IsOperationError(ex))
         {

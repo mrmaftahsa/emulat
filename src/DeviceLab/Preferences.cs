@@ -6,7 +6,7 @@ namespace DeviceLab;
 internal sealed class Preferences
 {
     private static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = true };
-    private static readonly string Folder = Path.Combine(
+    internal static readonly string Folder = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "DeviceLab");
     private static readonly string FilePath = Path.Combine(Folder, "settings.json");
 

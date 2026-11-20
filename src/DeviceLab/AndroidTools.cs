@@ -1,3 +1,4 @@
+using System.ComponentModel;
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
@@ -5,7 +6,7 @@ using System.Text.RegularExpressions;
 
 namespace DeviceLab;
 
-internal sealed record AndroidDevice(string Name, string? Serial, string Status)
+internal sealed record AndroidDevice(string Name, string? Serial, string Status, string? LaunchError = null)
 {
     public bool IsOnline => Status == "Running";
 }
@@ -18,17 +19,23 @@ internal sealed partial class AndroidTools
     private static readonly TimeSpan StandardTimeout = TimeSpan.FromSeconds(12);
     private const string Offline = "Stopped";
     private const string Busy = "Starting";
-    private readonly Dictionary<string, DateTimeOffset> startingDevices = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, Launch> launches = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, string> launchFailures = new(StringComparer.Ordinal);
+
+    private sealed record Launch(Task<CommandResult> Completion, DateTimeOffset Deadline, bool Connected);
 
     public string SdkDirectory { get; }
+    public string RuntimeDirectory { get; }
+    public string ManagedJavaHome => Path.Combine(RuntimeDirectory, "Java", "21.0.13.1+2");
     public bool HasEmulator => File.Exists(Emulator);
     public bool HasAdb => File.Exists(Adb);
     private string Emulator => Path.Combine(SdkDirectory, "emulator", "emulator.exe");
     private string Adb => Path.Combine(SdkDirectory, "platform-tools", "adb.exe");
 
-    public AndroidTools(string sdkDirectory)
+    public AndroidTools(string sdkDirectory, string? runtimeDirectory = null)
     {
         SdkDirectory = Path.GetFullPath(sdkDirectory);
+        RuntimeDirectory = runtimeDirectory ?? Preferences.Folder;
     }
 
     public static string FindSdk()
@@ -71,13 +78,37 @@ internal sealed partial class AndroidTools
             }
         }
 
-        foreach (var (name, expiry) in startingDevices.ToArray())
+        foreach (var (name, launch) in launches.ToArray())
         {
-            if (expiry <= DateTimeOffset.UtcNow || (running.TryGetValue(name, out var device) && device.IsOnline))
-                startingDevices.Remove(name);
+            if (running.TryGetValue(name, out var device) && device.IsOnline)
+            {
+                launches[name] = launch with { Connected = true };
+                launchFailures.Remove(name);
+            }
+            else if (launch.Completion.IsCompleted)
+            {
+                try
+                {
+                    var result = await launch.Completion;
+                    if (!result.Succeeded && !launch.Connected)
+                        launchFailures[name] = DescribeLaunchFailure(result);
+                }
+                catch (Exception ex) when (ex is IOException or Win32Exception or InvalidOperationException)
+                {
+                    if (!launch.Connected)
+                        launchFailures[name] = ex.Message;
+                }
+                launches.Remove(name);
+            }
+            else if (DateTimeOffset.UtcNow > launch.Deadline && !launch.Connected)
+            {
+                launchFailures[name] = "Android is taking longer than expected. Check the emulator window.";
+            }
         }
         return names.Select(name => running.TryGetValue(name, out var device) ? device
-            : new AndroidDevice(name, null, startingDevices.ContainsKey(name) ? Busy : Offline)).ToArray();
+            : new AndroidDevice(name, null,
+                launches.TryGetValue(name, out var launch) && DateTimeOffset.UtcNow <= launch.Deadline ? Busy : Offline,
+                launchFailures.GetValueOrDefault(name))).ToArray();
     }
 
     public IReadOnlyList<SystemImage> ListSystemImages()
@@ -89,9 +120,10 @@ internal sealed partial class AndroidTools
         return Directory.EnumerateFiles(directory, "source.properties", SearchOption.AllDirectories)
             .Select(path => Path.GetRelativePath(SdkDirectory, Path.GetDirectoryName(path)!))
             .Select(relative => relative.Split(Path.DirectorySeparatorChar))
-            .Where(parts => parts.Length == 4)
+            .Where(parts => parts.Length == 4 && File.Exists(Path.Combine(SdkDirectory,
+                Path.Combine(parts), "system.img")))
             .Select(parts => new SystemImage(string.Join(';', parts),
-                $"{parts[1]}  /  {parts[2]}  /  {parts[3]}"))
+                ImageDisplayName(parts[1], parts[2], parts[3])))
             .Where(image => ImagePackage().IsMatch(image.Package))
             .OrderByDescending(image => ImageApiLevel(image.Package))
             .ThenBy(image => image.DisplayName, StringComparer.OrdinalIgnoreCase)
@@ -113,9 +145,12 @@ internal sealed partial class AndroidTools
         if (Lines(existing.Output).Contains(name, StringComparer.OrdinalIgnoreCase))
             throw new InvalidOperationException($"A virtual device named {name} already exists.");
 
-        var manager = FindAvdManager()
-            ?? throw new InvalidOperationException("Install Android SDK Command-line Tools in SDK Manager.");
-        var start = CreateAvdManagerStartInfo(manager, name, image.Package);
+        var folder = FindCommandLineTools()
+            ?? throw new InvalidOperationException("Open Setup to finish installing the Android tools.");
+        var java = await FindJavaHomeAsync()
+            ?? throw new InvalidOperationException("Open Setup and select Set up Android to install Java automatically.");
+        var manager = Path.Combine(folder, "bin", "avdmanager.bat");
+        var start = CreateBatchStartInfo(manager, java, $"create avd --name {name} --package \"{image.Package}\"");
         var result = await ProcessRunner.RunAsync(start, TimeSpan.FromMinutes(2), "no");
         result.EnsureSuccess($"Creating {name}");
     }
@@ -128,19 +163,37 @@ internal sealed partial class AndroidTools
         if (device.Name.Length == 0 || device.Name.Contains('"') || device.Name.Any(char.IsControl))
             throw new InvalidOperationException("The virtual device name is invalid.");
 
+        if (launches.TryGetValue(device.Name, out var previous) && !previous.Completion.IsCompleted)
+            throw new InvalidOperationException("This emulator is already open. Close its window before trying again.");
+
+        var acceleration = await CheckAccelerationAsync();
+        if (acceleration.Status != "Ready")
+            throw new InvalidOperationException("Windows virtualization is needed to start this device. Open Setup to check it.");
+
+        launchFailures.Remove(device.Name);
         var start = StartInfo(Emulator, ["-avd", device.Name]);
-        start.UseShellExecute = false;
-        start.CreateNoWindow = true;
-        using var process = Process.Start(start)
-            ?? throw new InvalidOperationException($"Could not launch {device.Name}.");
+        var completion = ProcessRunner.RunAsync(start, Timeout.InfiniteTimeSpan);
+        launches[device.Name] = new(completion, DateTimeOffset.UtcNow.AddMinutes(3), false);
+        if (await Task.WhenAny(completion, Task.Delay(750)) == completion)
+        {
+            var result = await completion;
+            if (!result.Succeeded)
+            {
+                launches.Remove(device.Name);
+                launchFailures[device.Name] = DescribeLaunchFailure(result);
+                throw new InvalidOperationException(launchFailures[device.Name]);
+            }
+        }
+    }
 
-        await Task.Delay(700);
-        if (process.HasExited && process.ExitCode != 0)
-            throw new InvalidOperationException(
-                $"The emulator exited with code {process.ExitCode}. Run diagnostics and check the device in Android Studio.");
-
-        // A successful launcher can exit after handing off to the emulator UI.
-        startingDevices[device.Name] = DateTimeOffset.UtcNow.AddSeconds(90);
+    private static string DescribeLaunchFailure(CommandResult result)
+    {
+        var lines = Lines(result.Error).Concat(Lines(result.Output)).ToArray();
+        var detail = lines.LastOrDefault(line => line.Contains("ERROR", StringComparison.OrdinalIgnoreCase))
+            ?? lines.LastOrDefault();
+        return string.IsNullOrWhiteSpace(detail)
+            ? "The emulator closed before Android started. Open Setup to check this PC."
+            : $"Android couldn’t start. {detail}";
     }
 
     public async Task StopDeviceAsync(AndroidDevice device)
@@ -148,7 +201,7 @@ internal sealed partial class AndroidTools
         var serial = await VerifyTargetAsync(device);
         var result = await RunToolAsync(Adb, ["-s", serial, "emu", "kill"]);
         EnsureConsoleSuccess(result, $"Stopping {device.Name}", "OK: killing emulator, bye bye");
-        startingDevices.Remove(device.Name);
+        launchFailures.Remove(device.Name);
     }
 
     public async Task InstallAsync(AndroidDevice device, string apk)
@@ -188,19 +241,19 @@ internal sealed partial class AndroidTools
 
     public async Task<IReadOnlyList<Diagnostic>> DiagnoseAsync()
     {
-        var manager = FindAvdManager();
+        var manager = FindCommandLineTools();
         var images = ListSystemImages();
-        var java = FindJava();
+        var java = await FindJavaHomeAsync();
         var results = new List<Diagnostic>
         {
             Check("SDK folder", Directory.Exists(SdkDirectory), SdkDirectory,
-                "Choose the Android SDK folder or install the SDK with Android Studio."),
-            Check("Android Emulator", File.Exists(Emulator), Emulator, "Install Android Emulator in SDK Manager."),
-            Check("Platform Tools / ADB", File.Exists(Adb), Adb, "Install Android SDK Platform-Tools."),
-            Check("Command-line Tools", manager is not null, manager ?? "", "Install Android SDK Command-line Tools."),
-            Check("Java", java is not null, java ?? "", "Set JAVA_HOME to a JDK or install Android Studio."),
+                "Use Set up Android to install the required files."),
+            Check("Android Emulator", File.Exists(Emulator), Emulator, "Use Set up Android to install the emulator."),
+            Check("Platform Tools / ADB", File.Exists(Adb), Adb, "Use Set up Android to install the connection tools."),
+            Check("Command-line Tools", manager is not null, manager ?? "", "Use Set up Android to install the Android tools."),
+            Check("Java", java is not null, java ?? "", "Use Set up Android to install Java automatically."),
             Check("System images", images.Count > 0, $"{images.Count} image(s) installed.",
-                "Install an Android system image in SDK Manager.")
+                "Use Set up Android to download an Android system.")
         };
 
         var root = Path.GetPathRoot(SdkDirectory);
@@ -211,28 +264,33 @@ internal sealed partial class AndroidTools
                 results.Add(new("SDK drive space", "Info", $"{drive.AvailableFreeSpace / (1024d * 1024 * 1024):0.0} GB free on {drive.Name}"));
         }
 
-        if (File.Exists(Emulator))
-        {
-            try
-            {
-                var acceleration = await RunToolAsync(Emulator, ["-accel-check"]);
-                var lines = Lines(acceleration.Output);
-                var checkHeader = Array.FindIndex(lines, line => line == "accel:");
-                var code = checkHeader >= 0 && checkHeader + 1 < lines.Length ? lines[checkHeader + 1] : null;
-                var ready = acceleration.Succeeded && (code is null || code == "0");
-                var description = string.Join(" ", lines.Where(line => line != "accel:" &&
-                    line != code && line != "accel").Concat(Lines(acceleration.Error)));
-                results.Add(Check("Virtualization", ready,
-                    description.Length > 0 ? description : "The emulator supports hardware acceleration.",
-                    description.Length > 0 ? description : "Check Windows Hypervisor Platform and firmware virtualization."));
-            }
-            catch (Exception ex) when (ex is TimeoutException or System.ComponentModel.Win32Exception)
-            {
-                results.Add(new("Virtualization", "Check", ex.Message));
-            }
-        }
+        if (HasEmulator)
+            results.Add(await CheckAccelerationAsync());
 
         return results;
+    }
+
+    public async Task<Diagnostic> CheckAccelerationAsync()
+    {
+        if (!HasEmulator)
+            return new("Virtualization", "Check", "Finish Android setup first.");
+        try
+        {
+            var acceleration = await RunToolAsync(Emulator, ["-accel-check"]);
+            var lines = Lines(acceleration.Output);
+            var checkHeader = Array.FindIndex(lines, line => line == "accel:");
+            var code = checkHeader >= 0 && checkHeader + 1 < lines.Length ? lines[checkHeader + 1] : null;
+            var ready = acceleration.Succeeded && (code is null || code == "0");
+            var description = string.Join(" ", lines.Where(line => line != "accel:" &&
+                line != code && line != "accel").Concat(Lines(acceleration.Error)));
+            return Check("Virtualization", ready,
+                description.Length > 0 ? description : "Hardware acceleration is ready.",
+                description.Length > 0 ? description : "Windows could not start hardware acceleration.");
+        }
+        catch (Exception ex) when (ex is TimeoutException or Win32Exception)
+        {
+            return new("Virtualization", "Check", ex.Message);
+        }
     }
 
     private async Task<string> VerifyTargetAsync(AndroidDevice device)
@@ -251,49 +309,66 @@ internal sealed partial class AndroidTools
         return result.Succeeded && lines.Length == 2 && lines[1] == "OK" ? lines[0] : null;
     }
 
-    private string? FindAvdManager()
+    public string? FindCommandLineTools()
     {
         var root = Path.Combine(SdkDirectory, "cmdline-tools");
         if (!Directory.Exists(root))
             return null;
 
-        var latest = Path.Combine(root, "latest", "bin", "avdmanager.bat");
-        return File.Exists(latest) ? latest : Directory.EnumerateDirectories(root)
-            .OrderByDescending(path => Version.TryParse(Path.GetFileName(path), out var version) ? version : new Version())
-            .Select(path => Path.Combine(path, "bin", "avdmanager.bat"))
-            .FirstOrDefault(File.Exists);
+        var managed = Path.Combine(root, AndroidSetup.CommandLineToolsVersion);
+        var latest = Path.Combine(root, "latest");
+        return IsCommandLineFolder(managed) ? managed : IsCommandLineFolder(latest) ? latest :
+            Directory.EnumerateDirectories(root)
+                .Where(path => Version.TryParse(Path.GetFileName(path), out _))
+                .OrderByDescending(path => Version.Parse(Path.GetFileName(path)))
+                .FirstOrDefault(IsCommandLineFolder);
     }
 
-    private static string? FindJava()
-    {
-        var javaHome = Environment.GetEnvironmentVariable("JAVA_HOME");
-        if (!string.IsNullOrWhiteSpace(javaHome))
-            return ExistingJava(Path.Combine(javaHome, "bin"));
+    internal static bool IsCommandLineFolder(string path) =>
+        File.Exists(Path.Combine(path, "bin", "avdmanager.bat"))
+        && File.Exists(Path.Combine(path, "bin", "sdkmanager.bat"));
 
+    public async Task<string?> FindJavaHomeAsync(CancellationToken cancellationToken = default)
+    {
         var studio = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
-            "Android", "Android Studio", "jbr", "bin");
+            "Android", "Android Studio", "jbr");
         var path = Environment.GetEnvironmentVariable("PATH") ?? "";
-        return ExistingJava(studio) ?? path.Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries)
-            .Select(directory => ExistingJava(directory.Trim('"')))
-            .FirstOrDefault(java => java is not null);
+        var homes = new[] { ManagedJavaHome, Environment.GetEnvironmentVariable("JAVA_HOME"), studio }
+            .Concat(path.Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries)
+                .Select(bin => Path.GetDirectoryName(bin.Trim('"').TrimEnd(Path.DirectorySeparatorChar))))
+            .Where(home => !string.IsNullOrWhiteSpace(home) && Path.IsPathFullyQualified(home))
+            .Distinct(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var home in homes)
+        {
+            if (!AndroidSetup.IsJavaFolder(home!))
+                continue;
+            try
+            {
+                var start = new ProcessStartInfo(Path.Combine(home!, "bin", "java.exe"));
+                start.ArgumentList.Add("-version");
+                var result = await ProcessRunner.RunAsync(start, TimeSpan.FromSeconds(5),
+                    cancellationToken: cancellationToken);
+                var match = JavaVersion().Match(result.Detail);
+                if (result.Succeeded && match.Success && int.Parse(match.Groups[1].Value, CultureInfo.InvariantCulture) >= 21)
+                    return home;
+            }
+            catch (Exception ex) when (ex is IOException or Win32Exception or TimeoutException)
+            {
+                // A missing or incompatible install can be repaired with Device Lab’s Java runtime.
+            }
+        }
+        return null;
     }
 
-    private static string? ExistingJava(string directory)
+    internal ProcessStartInfo CreateBatchStartInfo(string tool, string javaHome, string arguments)
     {
-        var java = Path.Combine(directory, "java.exe");
-        return Path.IsPathFullyQualified(java) && File.Exists(java) ? java : null;
-    }
-
-    private ProcessStartInfo CreateAvdManagerStartInfo(string manager, string name, string package)
-    {
-        // The .bat launcher requires cmd.exe. Both command operands have been allow-listed.
-        // Give the launcher path to cmd as an environment value inside double quotes.
+        // Only fixed arguments and allow-listed AVD names/package IDs are passed by callers.
+        // Supply paths through quoted environment expansions for cmd.exe's batch-file launcher.
         var start = StartInfo(Path.Combine(Environment.SystemDirectory, "cmd.exe"), []);
-        start.Environment["DEVICELAB_AVDMANAGER"] = manager;
-        var java = FindJava();
-        if (java is not null)
-            start.Environment["JAVA_HOME"] = Path.GetDirectoryName(Path.GetDirectoryName(java)!)!;
-        start.Arguments = $"/d /v:off /s /c \"\"%DEVICELAB_AVDMANAGER%\" create avd --name {name} --package \"{package}\"\"";
+        start.Environment["DEVICELAB_ANDROID_TOOL"] = tool;
+        start.Environment["JAVA_HOME"] = javaHome;
+        start.Arguments = $"/d /v:off /s /c \"\"%DEVICELAB_ANDROID_TOOL%\" {arguments}\"";
         return start;
     }
 
@@ -332,6 +407,14 @@ internal sealed partial class AndroidTools
 
     private static string[] Lines(string text) =>
         text.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+
+    private static string ImageDisplayName(string api, string tag, string architecture) =>
+        (api, tag, architecture) == ("android-35", "google_apis", "x86_64")
+            ? "Android 15 (recommended)"
+            : $"{api}  /  {tag}  /  {architecture}";
+
+    [GeneratedRegex("""\b(?:openjdk|java) version "(\d+)""", RegexOptions.CultureInvariant)]
+    private static partial Regex JavaVersion();
 
     private static int ImageApiLevel(string package)
     {
