@@ -210,7 +210,7 @@ internal sealed partial class AndroidSetup(AndroidTools tools)
         try
         {
             var archive = Path.Combine(stage, "download.zip");
-            await DownloadAsync(uri, checksum, archive, downloadMessage, progress, cancellationToken);
+            await VerifiedDownload.DownloadAsync(uri, checksum, archive, downloadMessage, progress, cancellationToken);
             progress.Report(new("Unpacking files…"));
             var unpacked = Path.Combine(stage, "unpacked");
             await Task.Run(() => ZipFile.ExtractToDirectory(archive, unpacked), cancellationToken);
@@ -235,41 +235,6 @@ internal sealed partial class AndroidSetup(AndroidTools tools)
                 // Leave the original installation error visible if cleanup fails.
             }
         }
-    }
-
-    private static async Task DownloadAsync(Uri uri, string checksum, string destination, string message,
-        IProgress<SetupProgress> progress, CancellationToken cancellationToken)
-    {
-        progress.Report(new(message + "…", 0));
-        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        deadline.CancelAfter(TimeSpan.FromMinutes(30));
-        using var response = await Http.GetAsync(uri, HttpCompletionOption.ResponseHeadersRead, deadline.Token);
-        response.EnsureSuccessStatusCode();
-        await using var content = await response.Content.ReadAsStreamAsync(deadline.Token);
-        await using var output = new FileStream(destination, FileMode.CreateNew, FileAccess.Write, FileShare.None, 65536, useAsync: true);
-        using var hash = IncrementalHash.CreateHash(checksum.Length == 64 ? HashAlgorithmName.SHA256 : HashAlgorithmName.SHA1);
-        var length = response.Content.Headers.ContentLength;
-        var buffer = new byte[65536];
-        long received = 0;
-        var lastPercent = 0;
-        while ((await content.ReadAsync(buffer, deadline.Token)) is var read && read > 0)
-        {
-            await output.WriteAsync(buffer.AsMemory(0, read), deadline.Token);
-            hash.AppendData(buffer, 0, read);
-            received += read;
-            if (length is > 0)
-            {
-                var percent = (int)(received * 100 / length.Value);
-                if (percent != lastPercent)
-                {
-                    lastPercent = percent;
-                    progress.Report(new(message + "…", percent));
-                }
-            }
-        }
-
-        if (!Convert.ToHexStringLower(hash.GetHashAndReset()).Equals(checksum, StringComparison.Ordinal))
-            throw new InvalidOperationException("A download failed its integrity check. Try setup again.");
     }
 
     private static string GetJavaRoot(string unpacked) =>

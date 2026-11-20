@@ -2,6 +2,7 @@ using System.ComponentModel;
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
+using System.Net.Http;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
@@ -16,6 +17,7 @@ public partial class MainWindow : Window
     private readonly DispatcherTimer pollTimer;
     private AndroidTools tools;
     private MEmuTools? memu;
+    private CancellationTokenSource? memuDownload;
     private bool useMEmu;
     private IReadOnlyList<AndroidDevice> devices = [];
     private Task currentPoll = Task.CompletedTask;
@@ -35,9 +37,7 @@ public partial class MainWindow : Window
         var savedSdk = preferences.SdkDirectory;
         tools = new(savedSdk is not null && Path.IsPathFullyQualified(savedSdk)
             ? savedSdk : AndroidTools.FindSdk());
-        if (MEmuTools.FindExecutable(preferences.MEmuExecutable) is { } memuExecutable)
-            memu = new(memuExecutable);
-        useMEmu = preferences.UseMEmu ?? memu is not null;
+        useMEmu = preferences.UseMEmu ?? !tools.HasEmulator;
         pollTimer = new() { Interval = TimeSpan.FromSeconds(5) };
         pollTimer.Tick += PollTick;
         InitializeComponent();
@@ -51,6 +51,18 @@ public partial class MainWindow : Window
     {
         await PerformAsync("Checking this PC…", async () =>
         {
+            if (await FindMEmuAsync() is { } executable)
+            {
+                memu = new(executable);
+                if (preferences.UseMEmu is null)
+                {
+                    useMEmu = true;
+                    EmulatorChoice.SelectedIndex = 0;
+                }
+            }
+
+            if (closed)
+                return;
             await UpdateEnvironmentAsync();
             if (!setupReady || (!useMEmu && !accelerationReady))
                 SetupNav.IsChecked = true;
@@ -64,6 +76,7 @@ public partial class MainWindow : Window
     {
         closed = true;
         pollTimer.Stop();
+        memuDownload?.Cancel();
     }
 
     private void NavigationChanged(object sender, RoutedEventArgs e)
@@ -88,7 +101,7 @@ public partial class MainWindow : Window
             devices = [];
             UpdateDeviceList();
             if (useMEmu && memu?.IsInstalled != true
-                && MEmuTools.FindExecutable(preferences.MEmuExecutable) is { } detected)
+                && await FindMEmuAsync() is { } detected)
                 memu = new(detected);
 
             await UpdateEnvironmentAsync();
@@ -101,9 +114,130 @@ public partial class MainWindow : Window
         });
     }
 
+    private async void FindMEmuClicked(object sender, RoutedEventArgs e)
+    {
+        await PerformAsync("Looking for MEmu on this PC…", async () =>
+        {
+            var executable = await FindMEmuAsync();
+            if (executable is null)
+            {
+                SetStatus("MEmu wasn’t found. Open your existing copy and try Find installed MEmu again, or click Install MEmu.");
+                return;
+            }
+
+            await ConnectMEmuAsync(executable);
+        });
+    }
+
+    private async void InstallMEmuClicked(object sender, RoutedEventArgs e)
+    {
+        await PerformAsync("Checking for an existing MEmu installation…", async () =>
+        {
+            if (await FindMEmuAsync() is { } existing)
+            {
+                await ConnectMEmuAsync(existing);
+                return;
+            }
+
+            if (closed)
+                return;
+
+            using var cancellation = new CancellationTokenSource();
+            var directory = Directory.CreateTempSubdirectory("DeviceLab-MEmu-");
+            memuDownload = cancellation;
+            MEmuProgressPanel.Visibility = Visibility.Visible;
+            CancelMEmuButton.Visibility = Visibility.Visible;
+            CancelMEmuButton.IsEnabled = true;
+            SetMEmuProgress(new("Downloading the official MEmu installer…", 0));
+            try
+            {
+                var path = Path.Combine(directory.FullName, "MEmu-Setup.exe");
+                await MEmuInstaller.DownloadAsync(path, new Progress<SetupProgress>(progress =>
+                {
+                    if (!closed && memuDownload == cancellation && !cancellation.IsCancellationRequested)
+                        SetMEmuProgress(progress);
+                }), cancellation.Token);
+                cancellation.Token.ThrowIfCancellationRequested();
+
+                memuDownload = null;
+                CancelMEmuButton.Visibility = Visibility.Collapsed;
+                SetMEmuProgress(new("Finish the MEmu Setup window. Device Lab will connect when setup completes."));
+                var result = await MEmuInstaller.RunAsync(path);
+                if (closed)
+                    return;
+                if (result is 3010 or 1641)
+                {
+                    SetStatus("Restart Windows, then open Device Lab to finish connecting to MEmu.");
+                    return;
+                }
+
+                SetMEmuProgress(new("Connecting Device Lab to MEmu…"));
+                var executable = await FindMEmuAsync();
+                for (var attempt = 0; !closed && executable is null && result == 0 && attempt < 8; attempt++)
+                {
+                    await Task.Delay(TimeSpan.FromSeconds(2));
+                    executable = await FindMEmuAsync();
+                }
+
+                if (closed)
+                    return;
+                if (executable is null)
+                {
+                    SetStatus("Setup closed before Device Lab could find MEmu. Finish any open setup window, then click Find installed MEmu.", error: true);
+                    return;
+                }
+                await ConnectMEmuAsync(executable);
+            }
+            catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
+            {
+                if (!closed)
+                    SetStatus("Download canceled. Click Install MEmu to try again.");
+            }
+            catch (Exception ex) when (ex is HttpRequestException or OperationCanceledException)
+            {
+                if (!closed)
+                    SetStatus("The MEmu download was interrupted. Check your internet connection and try again.", error: true);
+            }
+            finally
+            {
+                memuDownload = null;
+                if (!closed)
+                    MEmuProgressPanel.Visibility = Visibility.Collapsed;
+                try
+                {
+                    directory.Delete(recursive: true);
+                }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                {
+                    // A finishing installer can still have the download open.
+                }
+            }
+        });
+    }
+
+    private void CancelMEmuClicked(object sender, RoutedEventArgs e)
+    {
+        memuDownload?.Cancel();
+        CancelMEmuButton.IsEnabled = false;
+        SetMEmuProgress(new("Canceling download…"));
+    }
+
+    private void SetMEmuProgress(SetupProgress progress)
+    {
+        MEmuProgressBar.IsIndeterminate = progress.Percent is null;
+        MEmuProgressBar.Value = progress.Percent ?? 0;
+        MEmuProgressText.Text = progress.Percent is { } percent ? $"{progress.Message} {percent}%" : progress.Message;
+    }
+
+    private Task<string?> FindMEmuAsync()
+    {
+        var savedPath = preferences.MEmuExecutable;
+        return Task.Run(() => MEmuTools.FindExecutable(savedPath));
+    }
+
     private async void BrowseMEmuClicked(object sender, RoutedEventArgs e)
     {
-        var dialog = new OpenFolderDialog { Title = "Choose the MEmu folder that contains memuc.exe" };
+        var dialog = new OpenFolderDialog { Title = "Choose the MEmu installation folder" };
         if (memu is not null)
             dialog.InitialDirectory = Path.GetDirectoryName(memu.Executable) ?? "";
         if (dialog.ShowDialog(this) != true)
@@ -111,23 +245,34 @@ public partial class MainWindow : Window
 
         await PerformAsync("Connecting to MEmu…", async () =>
         {
-            var executable = new[] { Path.Combine(dialog.FolderName, "memuc.exe"),
-                Path.Combine(dialog.FolderName, "MEmu", "memuc.exe") }.FirstOrDefault(MEmuTools.IsCommandTool)
+            var executable = MEmuTools.FindInFolder(dialog.FolderName)
                 ?? throw new InvalidOperationException("Choose your MEmu installation folder. It should contain memuc.exe.");
-            var detected = new MEmuTools(executable);
-            var available = await detected.ListDevicesAsync();
-            preferences.MEmuExecutable = executable;
-            preferences.UseMEmu = true;
-            preferences.Save();
+            await ConnectMEmuAsync(executable);
+        });
+    }
 
-            memu = detected;
-            devices = [];
-            UpdateDeviceList();
-            devices = available;
-            await UpdateEnvironmentAsync();
-            UpdateDeviceList();
-            DevicesNav.IsChecked = true;
-        }, "Connected to MEmu.");
+    private async Task ConnectMEmuAsync(string executable)
+    {
+        if (closed)
+            return;
+
+        var detected = new MEmuTools(executable);
+        var available = await detected.ListDevicesAsync();
+        if (closed)
+            return;
+
+        preferences.MEmuExecutable = executable;
+        preferences.UseMEmu = true;
+        preferences.Save();
+
+        memu = detected;
+        devices = [];
+        UpdateDeviceList();
+        devices = available;
+        await UpdateEnvironmentAsync();
+        UpdateDeviceList();
+        DevicesNav.IsChecked = true;
+        SetStatus("Connected to MEmu.");
     }
 
     private void OpenSetupClicked(object sender, RoutedEventArgs e) => SetupNav.IsChecked = true;
@@ -178,7 +323,7 @@ public partial class MainWindow : Window
             UpdateDeviceList(selectName, selectMEmuIndex);
         }
         if (!CanListDevices)
-            SetStatus(useMEmu ? "Choose your MEmu installation in Setup." : "Choose Set up Android to get started.");
+            SetStatus(useMEmu ? "Open Setup and click Install MEmu." : "Choose Set up Android to get started.");
     }
 
     private void UpdateDeviceList(string? selectName = null, int? selectMEmuIndex = null)
@@ -211,7 +356,7 @@ public partial class MainWindow : Window
         CreateFirstButton.Visibility = setupReady && devices.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
         EmptyTitle.Text = !setupReady ? (useMEmu ? "Connect to MEmu" : "Set up Android")
             : devices.Count > 0 ? "Select a virtual device" : "You’re ready to create a device";
-        EmptyHint.Text = !setupReady ? (useMEmu ? "Pick your MEmu installation in Setup."
+        EmptyHint.Text = !setupReady ? (useMEmu ? "Install MEmu from Setup to get started."
                 : "Device Lab can download the tools this PC needs.")
             : devices.Count > 0 ? "Clear the filter to see all registered devices."
             : useMEmu ? "Create a device with MEmu’s default Android version."
@@ -251,6 +396,8 @@ public partial class MainWindow : Window
         RefreshButton.IsEnabled = !busy && CanListDevices;
         EmulatorChoice.IsEnabled = !busy;
         BrowseMEmuButton.IsEnabled = !busy;
+        InstallMEmuButton.IsEnabled = !busy;
+        FindMEmuButton.IsEnabled = !busy;
         NewButton.IsEnabled = !busy && setupReady;
         CreateFirstButton.IsEnabled = !busy && setupReady;
         GuidedSetupButton.IsEnabled = !busy;
@@ -277,7 +424,9 @@ public partial class MainWindow : Window
         {
             setupReady = memu?.IsInstalled == true;
             MEmuSummary.Text = setupReady ? "MEmu is connected. Open Devices to use your emulators."
-                : "Choose the folder where MEmu is installed. Device Lab looks for memuc.exe.";
+                : "Device Lab can download the official MEmu installer (about 770 MB). Follow the installer’s prompts to finish setup.";
+            InstallMEmuButton.Visibility = setupReady ? Visibility.Collapsed : Visibility.Visible;
+            FindMEmuButton.Visibility = setupReady ? Visibility.Collapsed : Visibility.Visible;
             ShowSelectedDevice();
             return;
         }

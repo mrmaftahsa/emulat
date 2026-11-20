@@ -10,6 +10,6 @@
     <AssemblyName>DeviceLab</AssemblyName>
     <AssemblyTitle>Device Lab</AssemblyTitle>
     <Product>Device Lab</Product>
-    <Version>0.3.0</Version>
+    <Version>0.4.0</Version>
   </PropertyGroup>
 </Project>

@@ -4,11 +4,12 @@ Device Lab is a Windows app for Android emulator testing. It manages virtual dev
 
 ## Use MEmu on Windows
 
-1. If MEmu already works on your PC, install [Device Lab for Windows x64](https://github.com/mrmaftahsa/emulat/releases/latest/download/DeviceLab-setup-win-x64.exe).
-2. Device Lab detects MEmu and opens its device list automatically for a new setup. Select **MEmu** in the **Emulator** menu to switch to it. For a custom install, open **Setup → Choose MEmu folder** and select the folder containing `memuc.exe`.
-3. Select an existing MEmu device and click **Start**, or use **New device** to create and start a new instance. Use **Install APK** and **Read logs** after MEmu starts.
+1. Install [Device Lab for Windows x64](https://github.com/mrmaftahsa/emulat/releases/latest/download/DeviceLab-setup-win-x64.exe). Choose **MEmu** in the upper-right **Emulator** menu.
+2. On a PC with MEmu, Device Lab will look for its installation. You can open MEmu and click **Setup → Find installed MEmu** to scan again. The folder picker under **Advanced settings** covers portable or unusual installs.
+3. If MEmu is missing, click **Setup → Install MEmu**. Device Lab downloads and verifies the official offline installer (about 770 MB) and opens it. Follow the prompts from MEmu and Windows. Device Lab will connect when setup finishes.
+4. Select an existing MEmu device and click **Start**, or use **New device** to create and start a new instance. Use **Install APK** and **Read logs** after MEmu starts.
 
-MEmu runs and stores its devices through its own installation. Device Lab uses the [official MEmu command-line tool](https://www.memuplay.com/blog/memucommand-reference-manual.html).
+MEmu runs and stores its devices through its own installation. The official installer stays separate from the Device Lab download. Device Lab uses the [official MEmu command-line tool](https://www.memuplay.com/blog/memucommand-reference-manual.html).
 
 ## Use the Android SDK emulator on Windows
 
@@ -27,7 +28,7 @@ Install the [.NET 10 SDK](https://dotnet.microsoft.com/download/dotnet/10.0) on 
 dotnet run --project src/DeviceLab/DeviceLab.csproj
 ```
 
-The **Build Windows app** workflow builds the x64 installer and tests Windows startup. Release builds also test provisioning a clean SDK and creating an AVD before publishing downloads. From **Actions**, enter the version in the workflow dispatch form to publish a release, or select **Verify a clean Android download and AVD creation** to run the check on its own.
+The **Build Windows app** workflow builds the x64 installer and tests Windows startup. Release builds also verify the MEmu offline installer and its publisher, then test provisioning a clean SDK and creating an AVD before publishing downloads. From **Actions**, enter the version in the workflow dispatch form to publish a release, or select **Verify a clean Android download and AVD creation** to run the check on its own.
 
 - `MainWindow.xaml` and `MainWindow.xaml.cs` contain the device controls and setup entry points.
 - `SetupWindow.xaml` and `AndroidSetup.cs` guide users through downloading the dependencies.

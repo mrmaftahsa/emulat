@@ -25,68 +25,101 @@ internal sealed partial class MEmuTools(string executable)
 
         foreach (var root in new[] { Environment.SpecialFolder.ProgramFiles, Environment.SpecialFolder.ProgramFilesX86 })
         {
-            var path = InInstallFolder(Environment.GetFolderPath(root, Environment.SpecialFolderOption.DoNotVerify), "Microvirt", "MEmu");
+            var folder = Environment.GetFolderPath(root, Environment.SpecialFolderOption.DoNotVerify);
+            var path = FindInFolder(Path.Combine(folder, "Microvirt")) ?? FindInFolder(Path.Combine(folder, "MEmu"));
             if (path is not null)
                 return path;
         }
 
+        if (OperatingSystem.IsWindows() && FindInRegistry() is { } registered)
+            return registered;
+
         // A running copy also reveals installations on a custom drive.
-        string? runningPath = null;
-        foreach (var process in Process.GetProcessesByName("MEmu"))
+        foreach (var name in new[] { "MEmu", "MEmuConsole", "MEmuHeadless", "MEmuSVC" })
         {
-            using (process)
+            string? runningPath = null;
+            foreach (var process in Process.GetProcessesByName(name))
             {
-                if (runningPath is not null)
-                    continue;
-                try
+                using (process)
                 {
-                    runningPath = InInstallFolder(Path.GetDirectoryName(process.MainModule?.FileName));
-                }
-                catch (Exception ex) when (ex is Win32Exception or InvalidOperationException or NotSupportedException)
-                {
-                    // Custom installations can also be selected in Setup.
+                    if (runningPath is not null)
+                        continue;
+                    try
+                    {
+                        var folder = Path.GetDirectoryName(process.MainModule?.FileName);
+                        runningPath = FindInFolder(folder) ?? FindInFolder(Path.GetDirectoryName(folder));
+                    }
+                    catch (Exception ex) when (ex is Win32Exception or InvalidOperationException or NotSupportedException)
+                    {
+                        // Some installed processes run at a higher privilege level.
+                    }
                 }
             }
+            if (runningPath is not null)
+                return runningPath;
         }
-        if (runningPath is not null)
-            return runningPath;
 
-        return OperatingSystem.IsWindows() ? FindInRegistry() : null;
+        foreach (var drive in DriveInfo.GetDrives().Where(drive => drive.DriveType == DriveType.Fixed))
+        {
+            var path = FindInFolder(Path.Combine(drive.Name, "Microvirt"))
+                ?? FindInFolder(Path.Combine(drive.Name, "Program Files", "Microvirt"))
+                ?? FindInFolder(Path.Combine(drive.Name, "Program Files (x86)", "Microvirt"))
+                ?? FindInFolder(Path.Combine(drive.Name, "MEmu"));
+            if (path is not null)
+                return path;
+        }
+        return null;
     }
 
-    private static string? InInstallFolder(string? folder, params string[] subfolders)
+    public static string? FindInFolder(string? folder)
     {
         folder = folder?.Trim().Trim('"');
         if (string.IsNullOrWhiteSpace(folder) || !Path.IsPathFullyQualified(folder))
             return null;
 
-        return new[] { Path.Combine([folder, .. subfolders, ToolName]), Path.Combine(folder, "MEmu", ToolName) }
-            .FirstOrDefault(IsCommandTool);
+        return new[] { Path.Combine(folder, ToolName), Path.Combine(folder, "MEmu", ToolName),
+            Path.Combine(folder, "Microvirt", "MEmu", ToolName) }.FirstOrDefault(IsCommandTool);
     }
 
     [System.Runtime.Versioning.SupportedOSPlatform("windows")]
     private static string? FindInRegistry()
     {
+        const string windows = @"SOFTWARE\Microsoft\Windows\CurrentVersion";
         foreach (var hive in new[] { RegistryHive.LocalMachine, RegistryHive.CurrentUser })
         foreach (var view in new[] { RegistryView.Registry64, RegistryView.Registry32 })
         {
             try
             {
                 using var root = RegistryKey.OpenBaseKey(hive, view);
-                using var appPaths = root.OpenSubKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\MEmu.exe");
-                var app = appPaths?.GetValue(null) as string;
-                var path = InInstallFolder(Path.GetDirectoryName(app?.Trim().Trim('"')));
-                if (path is not null)
-                    return path;
+                foreach (var key in new[] { @"SOFTWARE\Microvirt", @"SOFTWARE\Microvirt\MEmu" })
+                {
+                    using var vendor = root.OpenSubKey(key);
+                    var path = FindInFolder(vendor?.GetValue("InstallPath") as string)
+                        ?? FindInFolder(vendor?.GetValue("InstallDir") as string)
+                        ?? FindInFolder(vendor?.GetValue("InstallLocation") as string)
+                        ?? FindInFolder(vendor?.GetValue("Path") as string);
+                    if (path is not null)
+                        return path;
+                }
 
-                using var uninstall = root.OpenSubKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall");
+                foreach (var file in new[] { "MEmu.exe", "MEmuConsole.exe", ToolName })
+                {
+                    using var appPaths = root.OpenSubKey($@"{windows}\App Paths\{file}");
+                    var path = FindFromRegisteredCommand(appPaths?.GetValue(null) as string);
+                    if (path is not null)
+                        return path;
+                }
+
+                using var uninstall = root.OpenSubKey($@"{windows}\Uninstall");
                 foreach (var key in uninstall?.GetSubKeyNames() ?? [])
                 {
                     using var entry = uninstall!.OpenSubKey(key);
                     var name = entry?.GetValue("DisplayName") as string;
                     if (name is null || !name.StartsWith("MEmu", StringComparison.OrdinalIgnoreCase))
                         continue;
-                    path = InInstallFolder(entry?.GetValue("InstallLocation") as string);
+                    var path = FindInFolder(entry?.GetValue("InstallLocation") as string)
+                        ?? FindFromRegisteredCommand(entry?.GetValue("UninstallString") as string)
+                        ?? FindFromRegisteredCommand(entry?.GetValue("DisplayIcon") as string);
                     if (path is not null)
                         return path;
                 }
@@ -97,6 +130,21 @@ internal sealed partial class MEmuTools(string executable)
             }
         }
         return null;
+    }
+
+    internal static string? FindFromRegisteredCommand(string? command)
+    {
+        if (string.IsNullOrWhiteSpace(command))
+            return null;
+
+        var expanded = Environment.ExpandEnvironmentVariables(command.Trim());
+        var end = expanded.IndexOf(".exe", StringComparison.OrdinalIgnoreCase);
+        end = expanded[0] == '"' ? expanded.IndexOf('"', 1) : end < 0 ? -1 : end + 4;
+        if (end <= 0)
+            return null;
+
+        var path = expanded[..end].TrimStart('"');
+        return Path.IsPathFullyQualified(path) ? FindInFolder(Path.GetDirectoryName(path)) : null;
     }
 
     public async Task<IReadOnlyList<AndroidDevice>> ListDevicesAsync()
@@ -184,7 +232,7 @@ internal sealed partial class MEmuTools(string executable)
     private async Task<string> RunAsync(string operation, string[] args, TimeSpan? timeout = null)
     {
         if (!IsInstalled)
-            throw new InvalidOperationException("Open Setup and choose the folder where MEmu is installed.");
+            throw new InvalidOperationException("Open Setup to install or reconnect MEmu.");
 
         var start = new ProcessStartInfo(Executable) { WorkingDirectory = Path.GetDirectoryName(Executable)! };
         foreach (var argument in args)

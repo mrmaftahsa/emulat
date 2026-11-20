@@ -7,6 +7,15 @@ if (Environment.GetEnvironmentVariable(StateVariable) is { } fixture)
     return;
 }
 
+if (args is ["--verify-installer", var destination])
+{
+    var path = Path.GetFullPath(destination);
+    using var deadline = new CancellationTokenSource(TimeSpan.FromMinutes(12));
+    await MEmuInstaller.DownloadAsync(path, new Progress<SetupProgress>(), deadline.Token);
+    Console.WriteLine("The official MEmu offline installer matched its pinned SHA-256 and size.");
+    return;
+}
+
 var directory = Directory.CreateTempSubdirectory("DeviceLab MEmu check ");
 try
 {
@@ -19,6 +28,16 @@ try
         File.Copy(Path.Combine(AppContext.BaseDirectory, "memuc"), executable, overwrite: true);
 
     Assert(MEmuTools.FindExecutable(executable) == executable, "A saved MEmu path must be reused.");
+    var program = Path.Combine(directory.FullName, "Custom install", "MEmu");
+    Directory.CreateDirectory(program);
+    var custom = Path.Combine(program, "memuc.exe");
+    File.WriteAllText(custom, "Discovery fixture");
+    var uninstaller = Path.Combine(program, "Uninstall.exe");
+    var player = Path.Combine(program, "MEmu.exe");
+    Assert(MEmuTools.FindFromRegisteredCommand($"\"{uninstaller}\" /S") == custom
+        && MEmuTools.FindFromRegisteredCommand(player + ",0") == custom
+        && MEmuTools.FindInFolder(Path.GetDirectoryName(program)) == custom,
+        "Custom installs must be located through registered commands and their parent folder.");
     var tools = new MEmuTools(executable);
     var devices = await tools.ListDevicesAsync();
     Assert(devices.Count == 2 && devices[0].Name == "Demo, Android"

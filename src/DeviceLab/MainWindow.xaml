@@ -192,8 +192,24 @@
                     <StackPanel>
                         <TextBlock Text="MEmu setup" Style="{StaticResource Heading}"/>
                         <TextBlock x:Name="MEmuSummary" Style="{StaticResource Hint}" Margin="0,5,0,13"/>
-                        <Button x:Name="BrowseMEmuButton" Content="Choose MEmu folder…" Click="BrowseMEmuClicked"
-                                HorizontalAlignment="Left"/>
+                        <WrapPanel>
+                            <Button x:Name="InstallMEmuButton" Content="_Install MEmu" Click="InstallMEmuClicked"
+                                    Style="{StaticResource PrimaryButton}" Margin="0,0,8,5"/>
+                            <Button x:Name="FindMEmuButton" Content="Find installed MEmu" Click="FindMEmuClicked"
+                                    Margin="0,0,8,5"/>
+                        </WrapPanel>
+                        <StackPanel x:Name="MEmuProgressPanel" Visibility="Collapsed" Margin="0,11,0,0">
+                            <ProgressBar x:Name="MEmuProgressBar" Height="7" Foreground="{StaticResource Accent}"
+                                         AutomationProperties.Name="MEmu setup progress"/>
+                            <TextBlock x:Name="MEmuProgressText" Style="{StaticResource Hint}" Margin="0,6,0,9"
+                                       AutomationProperties.LiveSetting="Polite"/>
+                            <Button x:Name="CancelMEmuButton" Content="Cancel download" Click="CancelMEmuClicked"
+                                    HorizontalAlignment="Left"/>
+                        </StackPanel>
+                        <Expander Header="Advanced settings" Margin="0,10,0,0">
+                            <Button x:Name="BrowseMEmuButton" Content="Choose existing MEmu folder…" Click="BrowseMEmuClicked"
+                                    HorizontalAlignment="Left" Margin="0,8,0,0"/>
+                        </Expander>
                     </StackPanel>
                 </Border>
 

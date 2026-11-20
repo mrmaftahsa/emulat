@@ -85,6 +85,24 @@ jobs:
           dotnet run --project tests/MEmuCheck/MEmuCheck.csproj -c Release
           if ($LASTEXITCODE -ne 0) { throw 'MEmu command checks failed.' }
 
+      - name: Verify the official MEmu installer
+        if: inputs.release_version != ''
+        shell: pwsh
+        run: |
+          $package = Join-Path $env:RUNNER_TEMP 'DeviceLab-MEmu-offline.exe'
+          try {
+            dotnet run --project tests/MEmuCheck/MEmuCheck.csproj -c Release -- --verify-installer $package
+            if ($LASTEXITCODE -ne 0) { throw 'MEmu installer download verification failed.' }
+            $signature = Get-AuthenticodeSignature -FilePath $package
+            if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notlike '*Shanghai Microvirt Software Technology*') {
+              throw "MEmu installer publisher could not be verified. Signature status: $($signature.Status)."
+            }
+            Write-Output 'Verified the official Microvirt Authenticode signature.'
+          }
+          finally {
+            Remove-Item -LiteralPath $package -Force -ErrorAction SilentlyContinue
+          }
+
       - name: Verify Android setup on a clean SDK
         if: inputs.check_android_setup || inputs.release_version != ''
         shell: pwsh

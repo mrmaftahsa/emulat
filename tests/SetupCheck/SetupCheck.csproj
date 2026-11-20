@@ -7,6 +7,7 @@
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="../../src/DeviceLab/AndroidSetup.cs" Link="AndroidSetup.cs" />
+    <Compile Include="../../src/DeviceLab/VerifiedDownload.cs" Link="VerifiedDownload.cs" />
     <Compile Include="../../src/DeviceLab/AndroidTools.cs" Link="AndroidTools.cs" />
     <Compile Include="../../src/DeviceLab/Preferences.cs" Link="Preferences.cs" />
     <Compile Include="../../src/DeviceLab/ProcessRunner.cs" Link="ProcessRunner.cs" />
